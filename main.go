@@ -29,6 +29,9 @@ var (
 	allowedIPs = flag.String("allowed-ips", os.Getenv("ALLOWED_IPS"), "Comma-separated list of allowed IP addresses")
 	port       = flag.String("port", os.Getenv("PORT"), "Port to listen on")
 
+	// Create a custom Prometheus registry
+	customRegistry = prometheus.NewRegistry()
+
 	networkSpeedBits = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "network_interface_speed_bits",
@@ -93,11 +96,12 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(networkSpeedBits)
-	prometheus.MustRegister(networkErrors)
-	prometheus.MustRegister(networkDrops)
-	prometheus.MustRegister(networkPackets)
-	prometheus.MustRegister(networkInterfaceInfo)
+	// Register only custom metrics to the custom registry
+	customRegistry.MustRegister(networkSpeedBits)
+	customRegistry.MustRegister(networkErrors)
+	customRegistry.MustRegister(networkDrops)
+	customRegistry.MustRegister(networkPackets)
+	customRegistry.MustRegister(networkInterfaceInfo)
 }
 
 // cleanupOldInterfaces removes interfaces that haven't been seen for a while
@@ -302,22 +306,20 @@ func isIPAllowed(remoteAddr string) bool {
 	return false
 }
 
-func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	if !isIPAllowed(r.RemoteAddr) {
-		http.Error(w, "Access denied", http.StatusForbidden)
-		return
-	}
-	promhttp.Handler().ServeHTTP(w, r)
-}
-
 func main() {
 	flag.Parse()
 
 	// Start collecting network speeds in a goroutine
 	go collectNetworkSpeeds()
 
-	// Expose the registered metrics via HTTP with IP whitelist
-	http.Handle("/metrics", http.HandlerFunc(metricsHandler))
+	// Expose the registered metrics via HTTP with IP whitelist, using the custom registry
+	http.Handle("/metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isIPAllowed(r.RemoteAddr) {
+			http.Error(w, "Access denied", http.StatusForbidden)
+			return
+		}
+		promhttp.HandlerFor(customRegistry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	}))
 
 	log.Printf("Starting server on :%v with IP whitelist: %v", *port, *allowedIPs)
 	if err := http.ListenAndServe(":"+*port, nil); err != nil {
